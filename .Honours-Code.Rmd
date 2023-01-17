@@ -1,0 +1,464 @@
+---
+Title: Script for reading in fasta files for assessing diversity across phylogenetic resolutions
+Author: Matthew Turner
+Creation Date: 07/10/2022
+Final version date: 12/01/2023
+---
+
+##Loading in packages
+
+```{r}
+#install.packages("BiocManager")
+#install.packages("data.table")
+#BiocManager::install("phyloseq")
+#BiocManager::install("dada2")
+#install.packages("plyr")
+#install.packages("uclust")
+#BiocManager::install("tibble")
+#BiocManager::install("DECIPHER")
+#BiocManager::install("Biostrings")
+#BiocManager::install("rlang")
+#install.packages("emmeans")
+#install.packages("gridExtra ")
+library(phyloseq)
+library(ggplot2)
+library(data.table)
+library(seqinr)
+library(tidyr)
+#library(dplyr)
+#library(purrr)
+library(tidyverse)
+#library(dada2)
+#library(plyr)
+#library(uclust)
+#library(tibble)
+library(DECIPHER)
+library(Biostrings)
+library(emmeans)
+#library(gridExtra)
+```
+
+##Reading in the Data into tables and then turning them into phyloseq objects. In this current state the creating of the list of all the samples isn't actually needed so those lines have been commented out and can be ignored.
+
+```{r}
+
+temp <- list.files(pattern = "*.fasta") #Reading a list of the files to an object
+temp <- file.path(temp) #Assigning this to a be a file path
+a = 1 #Setting the count variable
+temp <- temp[order(as.numeric(sub("([0-9]*).*", "\\1", temp)))]
+rm(All_anno_frame) #Reset the annotation frame
+#rm(list = ls())
+meta <- read.table("Sample_DNA_SIP.txt", header = TRUE, stringsAsFactors = FALSE)#Read in meta data from text file
+#meta$Sample[[1]][a]
+rownames(meta) <- meta$Sample #Set metadata rownames to samples
+meta
+temp
+for (val in temp) {#For loop for setting the file as a data frame
+  
+   All_anno_frame <- select(separate(separate(as.data.frame(t(data.frame(getAnnot(read.fasta(file = file.path(temp[a])))))), into = c("name", "Size"), col = 'V1', sep = ";"), into = c("Title", "Size"), col = 'Size', sep = "="),-1, -2) #this reads in the annotation data from the first file from the temp list of .fasta files
+   
+   get_Seq_frame <- do.call(rbind.data.frame, read.fasta(file = file.path(temp[a]), seqtype = "DNA", as.string = TRUE, whole.header = TRUE, seqonly = FALSE, strip.desc = TRUE)) #This reads in the sequences data only of the same file
+   
+   All_anno_frame <- strtoi(All_anno_frame[ ,1]) #Sets the abundances to integer values
+   
+   All_anno_frame <- t(All_anno_frame) #Transforms the annotation frame
+   
+   colnames(All_anno_frame) <- get_Seq_frame[ ,1]#Sets the annotation frame columns to their respective sequences
+   
+   rm(get_Seq_frame)#Removes the seqeunce frame
+   
+   All_anno_frame <- otu_table(All_anno_frame, taxa_are_rows = FALSE) #Generate OTU table using this sample data
+   
+   rownames(All_anno_frame) <- toString(meta$Sample[a]) #Renames the rows to the sample names (likely useless as this gets overwritten alter, but I'm afraid to remove anything)
+   
+   if (a == 1) #if it is the first run of the loop
+     {sumPhyloseq <- All_anno_frame}#Then save the otu table under another name
+     else  #If it isn't the first run of the loop
+      {sumPhyloseq <- merge(sumPhyloseq, All_anno_frame, all = TRUE, sort = FALSE)
+      } #Then merge the new OTU table with the saved original and save under the same name (sumPhyloseq)
+   assign(paste("Sample", a, "Size", sep = ""), All_anno_frame) #Renames the table
+   
+   a=a+1#Adds to the count variable
+}
+
+rownames(sumPhyloseq) <- meta$Sample #Set the rownames of the phyloseq object to equal the sample names
+sumPhyloseq[is.na(sumPhyloseq)] <- 0
+
+seqtab_clustered100 <- phyloseq(otu_table(sumPhyloseq, taxa_are_rows = FALSE), sample_data(meta))#Generate phyloseq object using  merged OTU table and metadata
+
+testRich100 <- estimate_richness(seqtab_clustered100,  measures = "Shannon") #Assesses shannon diversity
+
+write.csv(testRich100, "Richness100.csv") #Write a csv file of the richness data
+
+```
+
+#Clustering the data
+
+```{r}
+
+nproc <- 4 # set to number of cpus/processors to use for the clustering
+asv_sequences <- colnames(sumPhyloseq) 
+sample_names <- rownames(sumPhyloseq)
+dna <- Biostrings::DNAStringSet(asv_sequences) #ASV sequences converted to DNA strings 
+aln <- DECIPHER::AlignSeqs(dna, processors = nproc) #Aligning sequences
+d <- DECIPHER::DistanceMatrix(aln, processors = nproc) #Generating distance matrix
+#Clustering data based off of distance matrix d
+clusters <- DECIPHER::TreeLine(
+  myDistMatrix=d, 
+  method = "complete", #Set phylogenetic method to complete
+  cutoff = 0.30, # set resolution
+  type = "clusters", #Output to clusters
+  processors = nproc)
+clusters <- clusters %>%
+  add_column(sequence = asv_sequences)
+seqtab_clustered <- sumPhyloseq %>% 
+  t %>%
+  rowsum(clusters$cluster) %>%
+  t
+
+colnames(seqtab_clustered) <- paste0("OTU", colnames(seqtab_clustered)) #Set colnames of the clustered data to have OTU
+save(clusters, file = "./otu_clusters.RData") # save clustered data 
+
+######
+
+#seqtab_clustered[is.na(seqtab_clustered)] <- 0 #Set NA values to 0
+
+seqtab_clustered <- phyloseq(otu_table(seqtab_clustered, taxa_are_rows = FALSE), sample_data(meta))#Generate phyloseq object using  merged OTU table and metadata
+
+testRich <- estimate_richness(seqtab_clustered,  measures = "Shannon") #Assesses shannon diversity
+
+write.csv(testRich, "Richness70.csv") #Save file
+  
+```
+
+#Reading in the independant Total and active data & formatting some data
+
+```{r}
+
+data <- read.table("Final_Data_For_Questions.txt", header = TRUE, sep = "\t") #Read in the data from text file
+
+data$pH <- as.factor(data$pH) #Set pH to a category
+
+data$Temp <- as.factor(data$Temp) #Set temp to a category
+
+data$Phylogenetic.Resolution <- as.factor(data$Phylogenetic.Resolution)#Set resolution to a category
+
+data$Phylogenetic.Resolution <- factor(data$Phylogenetic.Resolution, levels = c("70", "75", "80", "85", "90", "95", "100")) #Set resolution order
+data$DiversityID <- factor(data$DiversityID, levels = c("Total", "Active")) #Set DiversityID order
+data$Pert2 <- factor(data$Pert2, levels = c("Maintained", "Perturbed")) # Set Pert2 order
+data$pH <- factor(data$pH, levels = c("4.5", "6", "7.5")) #Set pH order
+```
+
+#Creating rbook theme
+
+```{r}
+theme_rbook <- function(base_size = 13, base_family = "", base_line_size = base_size/22, 
+                         base_rect_size = base_size/22) {         
+  theme( 
+    axis.title = element_text(size = 13),                               
+    axis.text.x = element_text(size = 10),                              
+    axis.text.y = element_text(size = 10),                              
+    plot.caption = element_text(size = 10, face = "italic"),            
+    panel.background = element_rect(fill="white"),                      
+    axis.line = element_line(size = 1, colour = "black"),
+    strip.background =element_rect(fill = "#cddcdd"),
+    panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+        strip.text = element_text(colour = "black"),
+        legend.key=element_blank()
+  )
+}
+```
+
+#Question 1 Plot
+```{r}
+perturbedDataQ1 <- subset(data, Phylogenetic.Resolution == "100")
+
+#Generate boxplot
+q1plot <- ggplot(perturbedDataQ1) +
+    geom_boxplot(aes(y = Diversity, x = Pert2, fill = DiversityID)) +
+    labs(y = "Shannon Diversity (H')", x = "Environmental State") +
+    labs(caption = "Boxplots of active and total community diversity (Shannon)\nfor maintained and perturbed environmental conditions at 100% phylogenetic resolution.") +
+    theme_rbook()
+
+q1plot
+
+#Save file
+ggsave(filename = "Question_1-2.jpg", plot = q1plot, device = "jpg", 
+             path = "Plots", width = 250, height = 150, units = "mm", 
+             dpi = 500, limitsize = TRUE)
+```
+#Question 1 stats
+```{r}
+
+Q1lm <- aov(Diversity ~ DiversityID + Pert2 + DiversityID:Pert2, data = perturbedDataQ1) #ANCOVA model
+Q1lm_res <- resid(Q1lm) #Get the reiduals
+Q1lm_fit <- fitted(Q1lm) #Get the fits
+shapiro.test(Q1lm_res) #Test reiduals for normality
+
+par(mfrow = c(2,2))#Testing assumptions 
+plot(Q1lm)
+
+anova(Q1lm)#Get ANOVA table
+TukeyHSD(Q1lm, which = "Pert2" )#post hoc test
+
+emmeans(Q1lm, pairwise ~ DiversityID * Pert2) #Alternative post hoc
+
+```
+
+#Question 2 Plot
+```{r}
+perturbedDataQ2 <- subset(data, Pert2 = "Perturbed")
+
+#Try to get a rgression curve on this graph.
+
+q2Plot <- ggplot() +
+    geom_boxplot(aes(y = Diversity, x = Phylogenetic.Resolution, fill =  DiversityID), data = perturbedDataQ2) +
+    #facet_grid(~Phylogenetic.Resolution)+
+    labs(y = "Shannon Diversity (H')", x = "Phylogenetic Resolution (%)") +
+    labs(caption = "Boxplots of active and total community diversity (Shannon) for maintained\nand perturbed environmental conditions across all phylogenetic resolutions (%).", fill = "Diversity ID") +
+    theme_rbook()
+
+q2Plot
+
+ggsave(filename = "Question_2_2.jpg", plot = q2Plot, device = "jpg", 
+             path = "Plots", width = 250, height = 150, units = "mm", 
+             dpi = 500, limitsize = TRUE)
+```
+
+#Question 2 stats
+```{r}
+Q2lm <- aov(Diversity ~ DiversityID + Phylogenetic.Resolution + DiversityID:Phylogenetic.Resolution, data = perturbedDataQ2) #ANCOVA model
+Q2lm_res <- resid(Q2lm) #Get the reiduals
+Q2lm_fit <- fitted(Q2lm) #Get the fits
+shapiro.test(Q2lm_res) #Test reiduals for normality
+
+anova(Q2lm)#Get ANOVA table
+TukeyHSD(Q2lm, which = "Phylogenetic.Resolution" )#post hoc test
+
+emmeans(Q2lm, pairwise ~ DiversityID * Phylogenetic.Resolution) #Alternative post hoc
+```
+
+
+
+#Question 3 Plot
+```{r}
+perturbedDataQ3 <- subset(data, Pert1 == "Temp" & Phylogenetic.Resolution == "100" & DiversityID == "Active") #subset the data
+
+#Boxplot
+q3Plot <- ggplot(perturbedDataQ3) +
+    geom_boxplot(aes(y = Diversity, x = pH)) +
+    labs(y = "Diversity (Shannon)", x = "pH") +
+    facet_wrap(~Temp) +
+    labs(caption = "Boxplots of active community diversity (Shannon) when temperature is perturbed from 25 degrees C,\nat three maintained pH levels and 100% phylogenetic resolution.", tag = "A") +
+    theme_rbook()
+
+q3Plot
+
+ggsave(filename = "Question_3.jpg", plot = q3Plot, device = "jpg", 
+             path = "Plots", width = 250, height = 150, units = "mm", 
+             dpi = 500, limitsize = TRUE)
+```
+
+#Question 3 Stats
+```{r}
+Q3lm <- aov(Diversity ~ Temp + pH + Temp:pH, data = perturbedDataQ3) #ANCOVA model
+Q3lm_res <- resid(Q3lm) #Get the reiduals
+Q3lm_fit <- fitted(Q3lm) #Get the fits
+shapiro.test(Q3lm_res) #Test reiduals for normality
+
+anova(Q3lm)#Get ANOVA table
+TukeyHSD(Q3lm, which = "Pert2" )#post hoc test
+
+emmeans(Q3lm, pairwise ~ Temp * pH) #Alternative post hoc of perturbed temp at different levels of pH
+
+#Following code looks at whether there is a significant difference between maintained and perturbed temperature conditions for active diversity.
+
+perturbedDataQ3_2 <- subset(data, Pert1 == "Temp" & Phylogenetic.Resolution == "100" & DiversityID == "Active") #data subset
+
+Q3_2lm <- aov(Diversity ~ Pert2, data = perturbedDataQ3_2) #One-way ANOVa model
+
+Q3_2lm_res <- resid(Q3_2lm) #Get the reiduals
+Q3_2lm_fit <- fitted(Q3_2lm) #Get the fits
+shapiro.test(Q3_2lm_res) #Test reiduals for normality
+
+anova(Q3_2lm)
+
+```
+#Question 4 Plot
+```{r}
+perturbedDataQ4 <- subset(data, Pert1 == "Temp" & Phylogenetic.Resolution == "100" & DiversityID == "Total") #Datasubset
+
+#Q4 boxplot
+q4Plot <- ggplot(perturbedDataQ4) +
+    geom_boxplot(aes(y = Diversity, x = pH)) +
+    labs(y = "Diversity (Shannon)", x = "pH") +
+    facet_wrap(~Temp) +
+    labs(caption = "Boxplots of total community diversity (Shannon) when temperature is perturbed from 25 degrees C,\n at three maintained pH levels and 100% phylogenetic resolution.", tag = "B") +
+    theme_rbook()
+
+q4Plot
+
+#save plot
+ggsave(filename = "Question_4.jpg", plot = q4Plot, device = "jpg", 
+             path = "Plots", width = 250, height = 150, units = "mm", 
+             dpi = 500, limitsize = TRUE)
+```
+
+#Question 4 Stats
+
+```{r}
+Q4lm <- aov(Diversity ~ Temp + pH + Temp:pH, data = perturbedDataQ4) #ANCOVA model
+Q4lm_res <- resid(Q4lm) #Get the reiduals
+Q4lm_fit <- fitted(Q4lm) #Get the fits
+shapiro.test(Q4lm_res) #Test reiduals for normality
+
+anova(Q4lm)#Get ANOVA table
+#TukeyHSD(Q4lm, which = "Pert2" )#post hoc test
+
+emmeans(Q4lm, pairwise ~ Temp * pH) #Alternative post hoc of perturbed temp at different levels of pH
+
+#Following code looks at whether there is a significant difference between maintained and perturbed temperature conditions for total diversity.
+
+perturbedDataQ4_2 <- subset(data, Pert1 == "Temp" & Phylogenetic.Resolution == "100" & DiversityID == "Total")
+
+Q4_2lm <- aov(Diversity ~ Pert2, data = perturbedDataQ4_2)#One way ANOVA model
+
+Q4_2lm_res <- resid(Q4_2lm) #Get the reiduals
+Q4_2lm_fit <- fitted(Q4_2lm) #Get the fits
+shapiro.test(Q4_2lm_res) #Test reiduals for normality
+
+par(mfrow = c(2,2))#Testing assumptions 
+plot(Q4_2lm)
+
+anova(Q4_2lm)
+```
+
+#Big Graphs
+```{r}
+
+Q3and4plotData <- subset(data, Pert1 == "Temp" & Phylogenetic.Resolution == "100") #Q3/4 plot data
+
+#Q3/4 boxplot
+Q3and4plot <- ggplot(Q3and4plotData) +
+    geom_boxplot(aes(y = Diversity, x = Temp, fill = DiversityID)) +
+    labs(y = "Shannon Diversity (H')", x = "Temperature (°C)") +
+    facet_grid(DiversityID~pH) +
+    labs(caption = "Boxplots of active and total community diversity (Shannon) when temperature is\nperturbed from 25 degrees C, at three maintained pH levels at 100% phylogenetic resolution.") +
+    theme_rbook()
+
+Q3and4plot
+#save plot
+ggsave(filename = "Question_3_4(Alt2).jpg", plot = Q3and4plot, device = "jpg", 
+             path = "Plots", width = 250, height = 150, units = "mm", 
+             dpi = 500, limitsize = TRUE)
+
+Q5and6plotData <- subset(data, Pert1 == "pH" & Phylogenetic.Resolution == "100") #Q5/6 plot data
+
+#Q5/6 boxplot
+Q5and6plot <- ggplot(Q5and6plotData) +
+    geom_boxplot(aes(y = Diversity, x = pH, fill = DiversityID)) +
+    labs(y = "Shannon Diversity (H')", x = "pH") +
+    facet_grid(DiversityID~Temp) +
+    labs(caption = "Boxplots of active and total community diversity (Shannon) when pH is perturbed from 6,\n at three maintained temperatures, at 100% phylogenetic resolution.") +
+    theme_rbook()
+
+Q5and6plot
+#Save plot
+ggsave(filename = "Question_5_6-3.jpg", plot = Q5and6plot, device = "jpg", 
+             path = "Plots", width = 250, height = 150, units = "mm", 
+             dpi = 500, limitsize = TRUE)
+
+```
+
+#Question 5 Plot
+```{r}
+perturbedDataQ5 <- subset(data, Pert1 == "pH" & Phylogenetic.Resolution == "100" & DiversityID == "Active")
+
+q5Plot <- ggplot(perturbedDataQ5) +
+    geom_boxplot(aes(y = Diversity, x = Temp)) +
+    labs(y = "Diversity (Shannon)", x = "Temperature (Degrees Celcius)") +
+    facet_wrap(~pH) +
+    labs(caption = "Boxplots of active community diversity (Shannon) when pH is perturbed from 6,\n at three maintained temperatures and 100% phylogenetic resolution.") +
+    theme_rbook()
+
+q5Plot
+
+ggsave(filename = "Question_5.jpg", plot = q5Plot, device = "jpg", 
+             path = "Plots", width = 250, height = 150, units = "mm", 
+             dpi = 500, limitsize = TRUE)
+``` 
+#Question 5 Stats
+```{r}
+Q5lm <- aov(Diversity ~ pH + Temp + pH:Temp, data = perturbedDataQ5) #The two-way ANOVA
+Q5lm_res <- resid(Q5lm) #Get the reiduals
+Q5lm_fit <- fitted(Q5lm) #Get the fits
+shapiro.test(Q5lm_res) #Test reiduals for normality
+
+anova(Q5lm)#Get ANOVA table
+TukeyHSD(Q5lm, Pert2)#post hoc test
+
+emmeans(Q5lm, pairwise ~ pH * Temp) #Alternative post hoc of perturbed temp at different levels of pH
+
+#Following code looks at whether there is a significant difference between maintained and perturbed pH conditions for active diversity.
+
+perturbedDataQ5_2 <- subset(data, Pert1 == "pH" & Phylogenetic.Resolution == "100" & DiversityID == "Active")
+
+Q5_2lm <- aov(Diversity ~ Pert2, data = perturbedDataQ5_2)
+
+Q5_2lm_res <- resid(Q5_2lm) #Get the reiduals
+Q5_2lm_fit <- fitted(Q5_2lm) #Get the fits
+shapiro.test(Q5_2lm_res) #Test reiduals for normality
+
+anova(Q5_2lm)
+```
+
+The next thing to do will be to redo questions 3 & 4 but look at the total diversity instead to see how that is affected by environmental perturbations.
+Something to think about for the discussion would be why would an effect on active diversity be different to that on total diversity? consider what comprises the two and how they differ in this.
+
+#Question 6 Plot
+```{r}
+perturbedDataQ6 <- subset(data, Pert1 == "pH" & Phylogenetic.Resolution == "100" & DiversityID == "Total")
+
+q6Plot <- ggplot(perturbedDataQ6) +
+    geom_boxplot(aes(y = Diversity, x = Temp)) +
+    labs(y = "Diversity", x = "Temperature (Degrees Celcius)") +
+    facet_wrap(~pH) +
+    labs(caption = "Boxplots of total community diversity (Shannon) when pH is perturbed from 6,\n at three maintained temperatures and 100% phylogenetic resolution.") +
+    theme_rbook()
+
+q6Plot
+
+ggsave(filename = "Question_6.jpg", plot = q6Plot, device = "jpg", 
+             path = "Plots", width = 250, height = 150, units = "mm", 
+             dpi = 500, limitsize = TRUE)
+```
+
+#Question 6 Stats
+```{r}
+Q6lm <- aov(Diversity ~ pH + Temp + pH:Temp, data = perturbedDataQ6) #ANCOVA model
+Q6lm_res <- resid(Q6lm) #Get the reiduals
+Q6lm_fit <- fitted(Q6lm) #Get the fits
+shapiro.test(Q6lm_res) #Test reiduals for normality
+
+anova(Q6lm)#Get ANOVA table
+TukeyHSD(Q6lm, which = "Pert2" )#post hoc test
+
+emmeans(Q6lm, pairwise ~ pH * Temp) #Alternative post hoc of perturbed temp at different levels of pH
+
+#Following code looks at whether there is a significant difference between maintained and perturbed pH conditions for total diversity.
+
+perturbedDataQ6_2 <- subset(data, Pert1 == "pH" & Phylogenetic.Resolution == "100" & DiversityID == "Total")#One way ANOVA model
+
+Q6_2lm <- aov(Diversity ~ Pert2, data = perturbedDataQ6_2)#One way ANOVA model
+
+Q6_2lm_res <- resid(Q6_2lm) #Get the reiduals
+Q6_2lm_fit <- fitted(Q6_2lm) #Get the fits
+shapiro.test(Q6_2lm_res) #Test reiduals for normality
+
+par(mfrow = c(2,2))#Testing assumptions 
+plot(Q6_2lm)
+
+anova(Q6_2lm)
+```
+
+
